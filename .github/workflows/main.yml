@@ -1,0 +1,89 @@
+# Expression Syntax
+# https://help.github.com/en/articles/contexts-and-expression-syntax-for-github-actions
+
+# Events
+# https://help.github.com/en/articles/events-that-trigger-workflows#webhook-events
+
+# Installed Software
+# https://help.github.com/en/articles/software-in-virtual-environments-for-github-actions
+
+name: CI
+
+on: [push, create]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        architecture: [x86, arm]
+        node_version: [10]
+        os: [ubuntu-18.04, macOS-10.14, windows-2016]
+        exclude:
+        - architecture: arm
+          os: macOS-10.14
+        - architecture: arm
+          os: windows-2016
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@master
+    - name: Use Node.js ${{ matrix.node_version }}
+      uses: actions/setup-node@v1
+      with:
+        version: ${{ matrix.node_version }}
+    - name: Install Dependencies
+      run: |
+        cd $GITHUB_WORKSPACE/packages/bindings
+        npm install --ignore-scripts
+        npm install -g node-gyp
+      shell: bash
+    - name: Compile
+      run: |
+        cd $GITHUB_WORKSPACE/packages/bindings
+        node-gyp clean
+        node-gyp configure
+        node-gyp build
+      shell: bash
+      if: matrix.architecture != 'arm'
+    - name: Cross-compile for ARM
+      run: |
+        git clone --depth 1 https://github.com/raspberrypi/tools.git $HOME/raspberry-tools
+        CROSSCOMPILE_GYPI_CONTENTS="{
+          'make_global_settings': [
+            ['CC.target', '$HOME/raspberry-tools/arm-bcm2708/gcc-linaro-arm-linux-gnueabihf-raspbian-x64/bin/arm-linux-gnueabihf-gcc'],
+            ['CXX.target', '$HOME/raspberry-tools/arm-bcm2708/gcc-linaro-arm-linux-gnueabihf-raspbian-x64/bin/arm-linux-gnueabihf-g++'],
+            ['LINK.target', '$HOME/raspberry-tools/arm-bcm2708/gcc-linaro-arm-linux-gnueabihf-raspbian-x64/bin/arm-linux-gnueabihf-g++'],
+            ['AR.target', '$HOME/raspberry-tools/arm-bcm2708/gcc-linaro-arm-linux-gnueabihf-raspbian-x64/bin/arm-linux-gnueabihf-ar'],
+          ]
+        }"
+        CROSSCOMPILE_GYPI=/tmp/crosscompile.gypi
+        echo $CROSSCOMPILE_GYPI_CONTENTS > $CROSSCOMPILE_GYPI
+
+        cd $GITHUB_WORKSPACE/packages/bindings
+        node-gyp clean
+        node-gyp configure --arch=arm -- -I $CROSSCOMPILE_GYPI
+        node-gyp build
+      if: matrix.architecture == 'arm'
+    - name: Upload to Release
+      run: |
+        TAG=${GITHUB_REF#"refs/tags/"}
+        BINDIR="$GITHUB_WORKSPACE/packages/bindings/build/Release/"
+        FILENAME="$HOME/${OS%%-*}-$ARCHITECHTURE-node-$NODE_VERSION.zip"
+        if [ -x "$(command -v zip)" ]; then
+          zip -j -X $FILENAME $BINDIR/bindings.node
+        else
+          7z a $FILENAME $BINDIR/bindings.node
+        fi
+        go get -v -u github.com/tcnksm/ghr
+        for i in 1 2 3 4 5; do
+          $HOME/go/bin/ghr -replace $TAG $FILENAME && break || sleep 5
+        done
+      shell: bash
+      if: startsWith(github.ref, 'refs/tags/@serialport/bindings@')
+      env:
+        OS: ${{ matrix.os }}
+        ARCHITECHTURE: ${{ matrix.architecture }}
+        NODE_VERSION: ${{ matrix.node_version }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
